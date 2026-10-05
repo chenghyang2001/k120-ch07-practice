@@ -1,4 +1,4 @@
-"""旗標訂餐系統 Flask 後端：提供餐廳菜單分析（假資料）與訂單寫入 orders.xlsx。"""
+"""旗標訂餐系統 Flask 後端：提供餐廳菜單 AI 分析（menu_analyzer）與訂單寫入 orders.xlsx。"""
 import logging
 import threading
 from datetime import datetime
@@ -7,6 +7,15 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from openpyxl import Workbook, load_workbook
+
+from menu_analyzer import (
+    AnalyzeError,
+    AnalyzeTimeoutError,
+    FetchError,
+    InvalidUrlError,
+    MenuAnalyzeError,
+    analyze_menu,
+)
 
 # 以程式所在目錄為基準，避免從不同工作目錄啟動時找不到檔案，也避免硬編碼使用者路徑
 BASE_DIR = Path(__file__).resolve().parent
@@ -26,14 +35,13 @@ CORS(app)
 # openpyxl 不是 process-safe 的檔案寫入，多個請求同時 load→save 會互相覆蓋，故以鎖序列化
 orders_lock = threading.Lock()
 
-# TODO: 之後改為真正爬取/分析餐廳網址的菜單，目前先回傳固定假資料供前端串接
-FAKE_MENU_ITEMS = [
-    {"id": 1, "name": "大腸麵線", "price": 60, "options": ["正常", "少辣", "不辣"]},
-    {"id": 2, "name": "臭豆腐", "price": 70, "options": ["正常", "加辣", "不辣"]},
-    {"id": 3, "name": "蚵仔煎", "price": 75, "options": ["正常", "醬多", "醬少"]},
-    {"id": 4, "name": "滷肉飯", "price": 40, "options": ["小碗", "大碗"]},
-    {"id": 5, "name": "珍珠奶茶", "price": 55, "options": ["正常甜", "半糖", "無糖"]},
-]
+# 依例外類型決定 HTTP 狀態：網址問題是使用者端錯誤（400），抓網頁/AI 失敗是上游錯誤（502/504）
+ANALYZE_ERROR_STATUS = (
+    (InvalidUrlError, 400),
+    (FetchError, 502),
+    (AnalyzeTimeoutError, 504),
+    (AnalyzeError, 502),
+)
 
 
 class OrderValidationError(ValueError):
@@ -43,6 +51,14 @@ class OrderValidationError(ValueError):
 def error_response(message, status_code):
     """統一錯誤回應格式。"""
     return jsonify({"error": message}), status_code
+
+
+def analyze_error_status(analyze_error):
+    """查表取得菜單分析例外對應的 HTTP 狀態碼；未列出的子類別視為上游失敗（502）。"""
+    for error_type, status_code in ANALYZE_ERROR_STATUS:
+        if isinstance(analyze_error, error_type):
+            return status_code
+    return 502
 
 
 def sanitize_cell(value):
@@ -178,14 +194,22 @@ def serve_index():
 
 @app.route("/api/analyze", methods=["POST"])
 def analyze_restaurant():
-    """分析餐廳網址並回傳菜單品項（目前為假資料）。"""
+    """抓取餐廳網址並由 AI 分析出菜單品項。"""
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return error_response("請求內容必須是 JSON 物件", 400)
     if not is_valid_url(payload.get("url")):
         return error_response("請提供以 http:// 或 https:// 開頭的餐廳網址", 400)
-    # TODO: 依 payload["url"] 實際抓取並解析餐廳菜單，取代 FAKE_MENU_ITEMS
-    return jsonify({"items": FAKE_MENU_ITEMS}), 200
+    try:
+        items = analyze_menu(payload["url"].strip())
+    except MenuAnalyzeError as analyze_error:
+        status_code = analyze_error_status(analyze_error)
+        logger.warning("菜單分析失敗（HTTP %s）：%s", status_code, analyze_error)
+        return error_response(str(analyze_error), status_code)
+    except Exception:  # noqa: BLE001 — 最外層保護，細節只進 log 不回給前端
+        logger.exception("分析菜單時發生未預期錯誤")
+        return error_response("伺服器內部錯誤", 500)
+    return jsonify({"items": items}), 200
 
 
 @app.route("/api/order", methods=["POST"])
