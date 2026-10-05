@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>旗標訂餐系統</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --text: #1f2933;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --primary: #e8590c;
+    --primary-hover: #c94b08;
+    --error: #c92a2a;
+    --success: #2b8a3e;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+    line-height: 1.5;
+  }
+  main { max-width: 960px; margin: 0 auto; padding: 32px 16px 120px; }
+  h1 { margin: 0 0 24px; font-size: 1.8rem; text-align: center; }
+
+  .url-bar { display: flex; gap: 8px; }
+  input[type="text"], input[type="url"], input[type="number"], select {
+    font: inherit;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--text);
+    width: 100%;
+  }
+  input:focus, select:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: transparent; }
+  button {
+    font: inherit;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    background: var(--primary);
+    color: #fff;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { background: var(--primary-hover); }
+  button:disabled { opacity: .6; cursor: not-allowed; }
+
+  .message { margin: 12px 0 0; min-height: 1.5em; font-size: .95rem; }
+  .message.error { color: var(--error); }
+  .message.success { color: var(--success); }
+
+  /* loading 狀態 */
+  .loading { display: none; align-items: center; justify-content: center; gap: 12px; padding: 48px 0; color: var(--muted); }
+  .loading.active { display: flex; }
+  .spinner {
+    width: 28px; height: 28px;
+    border: 3px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .menu-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 16px;
+    margin-top: 24px;
+  }
+  .item-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .item-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .item-name { margin: 0; font-size: 1.1rem; }
+  .item-price { color: var(--primary); font-weight: 700; white-space: nowrap; }
+  .field label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: 4px; }
+  .row { display: grid; grid-template-columns: 1fr 90px; gap: 8px; }
+  .item-note { margin-top: auto; padding-top: 12px; border-top: 1px dashed var(--border); }
+
+  /* 底部訂單列 */
+  .order-bar {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    background: var(--card);
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -2px 8px rgba(0,0,0,.05);
+  }
+  .order-bar-inner {
+    max-width: 960px; margin: 0 auto; padding: 12px 16px;
+    display: flex; gap: 8px; align-items: center;
+  }
+  .order-bar .total { white-space: nowrap; font-weight: 700; margin-right: 8px; }
+  .order-bar input { flex: 1; }
+
+  @media (max-width: 560px) {
+    .url-bar { flex-direction: column; }
+    .order-bar-inner { flex-wrap: wrap; }
+    .order-bar .total { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>旗標訂餐系統</h1>
+
+  <section aria-label="菜單網址">
+    <form id="urlForm" class="url-bar" novalidate>
+      <input type="url" id="menuUrl" placeholder="請貼上菜單網址，例如 https://example.com/menu" aria-label="菜單網址" required>
+      <button type="submit" id="analyzeBtn">分析菜單</button>
+    </form>
+    <p id="urlMessage" class="message" role="status" aria-live="polite"></p>
+  </section>
+
+  <div id="loading" class="loading" role="status" aria-live="polite">
+    <div class="spinner" aria-hidden="true"></div>
+    <span>正在分析菜單，請稍候…</span>
+  </div>
+
+  <section id="menuGrid" class="menu-grid" aria-label="菜單品項"></section>
+</main>
+
+<footer class="order-bar">
+  <form id="orderForm" class="order-bar-inner" novalidate>
+    <span class="total" id="totalText">合計：$0</span>
+    <input type="text" id="customerName" placeholder="請輸入姓名" aria-label="姓名" maxlength="30">
+    <button type="submit" id="submitBtn">送出訂單</button>
+  </form>
+</footer>
+
+<script>
+  const urlForm = document.getElementById("urlForm");
+  const menuUrlInput = document.getElementById("menuUrl");
+  const analyzeBtn = document.getElementById("analyzeBtn");
+  const urlMessage = document.getElementById("urlMessage");
+  const loadingEl = document.getElementById("loading");
+  const menuGrid = document.getElementById("menuGrid");
+  const orderForm = document.getElementById("orderForm");
+  const customerNameInput = document.getElementById("customerName");
+  const totalText = document.getElementById("totalText");
+
+  let currentMenuItems = [];
+
+  // 純前端無法跨網域抓取任意網址（CORS），目前以模擬資料代替；
+  // 接上後端後改成 fetch("/api/analyze-menu", { method: "POST", body: JSON.stringify({ url }) })
+  async function analyzeMenu(url) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    return [
+      { id: 1, name: "招牌雞腿便當", price: 120, options: ["正常", "飯少", "飯多", "不要辣"] },
+      { id: 2, name: "排骨便當", price: 110, options: ["正常", "飯少", "飯多"] },
+      { id: 3, name: "珍珠奶茶", price: 60, options: ["正常甜/正常冰", "半糖/少冰", "微糖/去冰", "無糖/溫"] },
+      { id: 4, name: "清燉牛肉麵", price: 180, options: ["細麵", "寬麵", "麵少"] },
+      { id: 5, name: "燙青菜", price: 40, options: ["加肉燥", "不加肉燥"] },
+      { id: 6, name: "紅茶", price: 30, options: ["正常甜/正常冰", "半糖/少冰", "無糖/去冰"] },
+    ];
+  }
+
+  function showMessage(el, text, type) {
+    el.textContent = text;
+    el.className = "message" + (type ? " " + type : "");
+  }
+
+  function setLoading(isLoading) {
+    loadingEl.classList.toggle("active", isLoading);
+    analyzeBtn.disabled = isLoading;
+    analyzeBtn.textContent = isLoading ? "分析中…" : "分析菜單";
+  }
+
+  function isValidHttpUrl(text) {
+    try {
+      const parsed = new URL(text);
+      return parsed.protocol === "http:" || parsed.protocol === "https:";
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // 以 DOM API 建立元素（不用 innerHTML），避免菜單內容含惡意字串造成 XSS
+  function createField(labelText, control) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "field";
+    const label = document.createElement("label");
+    label.htmlFor = control.id;
+    label.textContent = labelText;
+    wrapper.append(label, control);
+    return wrapper;
+  }
+
+  function createItemCard(item) {
+    const card = document.createElement("article");
+    card.className = "item-card";
+    card.dataset.itemId = item.id;
+
+    const head = document.createElement("div");
+    head.className = "item-head";
+    const name = document.createElement("h2");
+    name.className = "item-name";
+    name.textContent = item.name;
+    const price = document.createElement("span");
+    price.className = "item-price";
+    price.textContent = "$" + item.price;
+    head.append(name, price);
+
+    const optionSelect = document.createElement("select");
+    optionSelect.id = "option-" + item.id;
+    (item.options ?? []).forEach((optionText) => {
+      const option = document.createElement("option");
+      option.value = optionText;
+      option.textContent = optionText;
+      optionSelect.append(option);
+    });
+    if (optionSelect.options.length === 0) {
+      optionSelect.append(new Option("無客製化選項", ""));
+      optionSelect.disabled = true;
+    }
+
+    const qtyInput = document.createElement("input");
+    qtyInput.type = "number";
+    qtyInput.id = "qty-" + item.id;
+    qtyInput.min = "0";
+    qtyInput.max = "99";
+    qtyInput.step = "1";
+    qtyInput.value = "0";
+    qtyInput.addEventListener("input", updateTotal);
+
+    const row = document.createElement("div");
+    row.className = "row";
+    row.append(createField("客製化選項", optionSelect), createField("數量", qtyInput));
+
+    const noteInput = document.createElement("input");
+    noteInput.type = "text";
+    noteInput.id = "note-" + item.id;
+    noteInput.maxLength = 100;
+    noteInput.placeholder = "例如：不要香菜、少冰";
+    const noteField = createField("備註", noteInput);
+    noteField.classList.add("item-note");
+
+    card.append(head, row, noteField);
+    return card;
+  }
+
+  function renderMenu(items) {
+    menuGrid.replaceChildren(...items.map(createItemCard));
+    updateTotal();
+  }
+
+  function getQuantity(itemId) {
+    const qty = Number(document.getElementById("qty-" + itemId)?.value);
+    return Number.isInteger(qty) && qty > 0 ? Math.min(qty, 99) : 0;
+  }
+
+  function collectOrderLines() {
+    return currentMenuItems
+      .map((item) => ({
+        id: item.id,
+        name: item.name,
+        price: item.price,
+        quantity: getQuantity(item.id),
+        option: document.getElementById("option-" + item.id).value,
+        note: document.getElementById("note-" + item.id).value.trim(),
+      }))
+      .filter((line) => line.quantity > 0);
+  }
+
+  function updateTotal() {
+    const total = collectOrderLines().reduce((sum, line) => sum + line.price * line.quantity, 0);
+    totalText.textContent = "合計：$" + total;
+  }
+
+  urlForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const url = menuUrlInput.value.trim();
+    if (!url) {
+      showMessage(urlMessage, "請先貼上菜單網址", "error");
+      return;
+    }
+    if (!isValidHttpUrl(url)) {
+      showMessage(urlMessage, "網址格式不正確，需以 http:// 或 https:// 開頭", "error");
+      return;
+    }
+
+    showMessage(urlMessage, "");
+    menuGrid.replaceChildren();
+    setLoading(true);
+    try {
+      const items = await analyzeMenu(url);
+      if (!Array.isArray(items) || items.length === 0) {
+        showMessage(urlMessage, "沒有從此網址分析出任何品項，請確認網址是否為菜單頁面", "error");
+        return;
+      }
+      currentMenuItems = items;
+      renderMenu(items);
+      showMessage(urlMessage, `分析完成，共 ${items.length} 個品項`, "success");
+    } catch (err) {
+      console.error("分析菜單失敗：", err);
+      showMessage(urlMessage, "分析菜單失敗，請稍後再試", "error");
+    } finally {
+      setLoading(false);
+    }
+  });
+
+  orderForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const customerName = customerNameInput.value.trim();
+    const orderLines = collectOrderLines();
+
+    if (currentMenuItems.length === 0) {
+      alert("請先分析菜單");
+      return;
+    }
+    if (orderLines.length === 0) {
+      alert("請至少選擇一個品項並填寫數量");
+      return;
+    }
+    if (!customerName) {
+      alert("請輸入姓名");
+      customerNameInput.focus();
+      return;
+    }
+
+    const order = { customerName, menuUrl: menuUrlInput.value.trim(), items: orderLines };
+    // 尚無後端，先輸出到 console；之後改為 POST 到訂單 API
+    console.log("送出訂單：", order);
+    const summary = orderLines.map((l) => `${l.name} × ${l.quantity}（${l.option}${l.note ? "，" + l.note : ""}）`).join("\n");
+    alert(`訂單已送出！\n訂購人：${customerName}\n\n${summary}\n\n${totalText.textContent}`);
+  });
+</script>
+</body>
+</html>
