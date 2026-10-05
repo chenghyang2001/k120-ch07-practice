@@ -103,6 +103,7 @@
   }
   .order-bar .total { white-space: nowrap; font-weight: 700; margin-right: 8px; }
   .order-bar input { flex: 1; }
+  .order-bar input.extension { flex: 0 0 110px; }
 
   @media (max-width: 560px) {
     .url-bar { flex-direction: column; }
@@ -135,6 +136,7 @@
   <form id="orderForm" class="order-bar-inner" novalidate>
     <span class="total" id="totalText">合計：$0</span>
     <input type="text" id="customerName" placeholder="請輸入姓名" aria-label="姓名" maxlength="30">
+    <input type="text" id="extension" class="extension" placeholder="分機" aria-label="分機" maxlength="10" inputmode="numeric">
     <button type="submit" id="submitBtn">送出訂單</button>
   </form>
 </footer>
@@ -148,22 +150,41 @@
   const menuGrid = document.getElementById("menuGrid");
   const orderForm = document.getElementById("orderForm");
   const customerNameInput = document.getElementById("customerName");
+  const extensionInput = document.getElementById("extension");
+  const submitBtn = document.getElementById("submitBtn");
   const totalText = document.getElementById("totalText");
 
   let currentMenuItems = [];
 
-  // 純前端無法跨網域抓取任意網址（CORS），目前以模擬資料代替；
-  // 接上後端後改成 fetch("/api/analyze-menu", { method: "POST", body: JSON.stringify({ url }) })
+  // 由 Flask 提供頁面時走同源；直接以 file:// 開啟時改連本機後端（後端已開 CORS）
+  const API_BASE = location.protocol === "file:" ? "http://127.0.0.1:5000" : "";
+
+  // 後端錯誤統一回 { error }，這裡轉成帶使用者可讀訊息的 Error 往上拋
+  async function postJson(path, body) {
+    let response;
+    try {
+      response = await fetch(API_BASE + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      throw new Error("無法連線到伺服器，請確認後端（python app.py）已啟動");
+    }
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(data?.error || `伺服器錯誤（HTTP ${response.status}）`);
+    }
+    return data;
+  }
+
   async function analyzeMenu(url) {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    return [
-      { id: 1, name: "招牌雞腿便當", price: 120, options: ["正常", "飯少", "飯多", "不要辣"] },
-      { id: 2, name: "排骨便當", price: 110, options: ["正常", "飯少", "飯多"] },
-      { id: 3, name: "珍珠奶茶", price: 60, options: ["正常甜/正常冰", "半糖/少冰", "微糖/去冰", "無糖/溫"] },
-      { id: 4, name: "清燉牛肉麵", price: 180, options: ["細麵", "寬麵", "麵少"] },
-      { id: 5, name: "燙青菜", price: 40, options: ["加肉燥", "不加肉燥"] },
-      { id: 6, name: "紅茶", price: 30, options: ["正常甜/正常冰", "半糖/少冰", "無糖/去冰"] },
-    ];
+    const data = await postJson("/api/analyze", { url });
+    return data?.items;
+  }
+
+  function submitOrder(order) {
+    return postJson("/api/order", order);
   }
 
   function showMessage(el, text, type) {
@@ -304,15 +325,22 @@
       showMessage(urlMessage, `分析完成，共 ${items.length} 個品項`, "success");
     } catch (err) {
       console.error("分析菜單失敗：", err);
-      showMessage(urlMessage, "分析菜單失敗，請稍後再試", "error");
+      showMessage(urlMessage, err.message || "分析菜單失敗，請稍後再試", "error");
     } finally {
       setLoading(false);
     }
   });
 
-  orderForm.addEventListener("submit", (event) => {
+  function resetOrderInputs() {
+    menuGrid.querySelectorAll('input[id^="qty-"]').forEach((input) => { input.value = "0"; });
+    menuGrid.querySelectorAll('input[id^="note-"]').forEach((input) => { input.value = ""; });
+    updateTotal();
+  }
+
+  orderForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const customerName = customerNameInput.value.trim();
+    const extension = extensionInput.value.trim();
     const orderLines = collectOrderLines();
 
     if (currentMenuItems.length === 0) {
@@ -328,12 +356,33 @@
       customerNameInput.focus();
       return;
     }
+    if (!extension) {
+      alert("請輸入分機");
+      extensionInput.focus();
+      return;
+    }
 
-    const order = { customerName, menuUrl: menuUrlInput.value.trim(), items: orderLines };
-    // 尚無後端，先輸出到 console；之後改為 POST 到訂單 API
-    console.log("送出訂單：", order);
-    const summary = orderLines.map((l) => `${l.name} × ${l.quantity}（${l.option}${l.note ? "，" + l.note : ""}）`).join("\n");
-    alert(`訂單已送出！\n訂購人：${customerName}\n\n${summary}\n\n${totalText.textContent}`);
+    // 欄位名稱對齊 app.py 的 validate_order：name / extension / items[{name, option, note, quantity, price}]
+    const order = {
+      name: customerName,
+      extension,
+      items: orderLines.map(({ name, option, note, quantity, price }) => ({ name, option, note, quantity, price })),
+    };
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = "送出中…";
+    try {
+      const result = await submitOrder(order);
+      const summary = orderLines.map((l) => `${l.name} × ${l.quantity}（${l.option}${l.note ? "，" + l.note : ""}）`).join("\n");
+      alert(`${result.message}！\n訂購人：${customerName}（分機 ${extension}）\n\n${summary}\n\n合計：$${result.total}`);
+      resetOrderInputs();
+    } catch (err) {
+      console.error("送出訂單失敗：", err);
+      alert("送出訂單失敗：" + err.message);
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "送出訂單";
+    }
   });
 </script>
 </body>
