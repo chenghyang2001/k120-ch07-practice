@@ -158,7 +158,7 @@
   const orderMessage = document.getElementById("orderMessage");
   const totalText = document.getElementById("totalText");
 
-  // 由 Flask 提供頁面時走同源相對路徑；直接雙擊開 file:// 時改打本機後端（後端已開 CORS）
+  // 需以 http://127.0.0.1:5000 開啟頁面，file:// 已不支援：file:// 的 Origin 為 null，會被後端 CORS 白名單擋下
   const API_BASE = location.protocol === "file:" ? "http://127.0.0.1:5000" : "";
 
   let currentMenuItems = [];
@@ -376,6 +376,11 @@
       submitBtn.textContent = "送出訂單";
     }
   });
+
+  // 直接雙擊開檔時呼叫 API 必定失敗，先告訴使用者正確開法，免得誤以為是後端壞掉
+  if (location.protocol === "file:") {
+    showMessage(urlMessage, "請以 http://127.0.0.1:5000 開啟本頁面（file:// 已不支援）", "error");
+  }
 </script>
 </body>
 </html>

@@ -3,6 +3,7 @@ import logging
 import threading
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -11,6 +12,7 @@ from openpyxl import Workbook, load_workbook
 from menu_analyzer import (
     AnalyzeError,
     AnalyzeTimeoutError,
+    BusyError,
     FetchError,
     InvalidUrlError,
     MenuAnalyzeError,
@@ -29,8 +31,12 @@ FORMULA_PREFIXES = ("=", "+", "-", "@")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+# 只接受本機發出的請求：/api/analyze 會在本機啟動 curl 與 claude，對外開放等於讓任何網頁借用本機資源
+LOCAL_HOSTNAMES = {"127.0.0.1", "localhost"}
+
 app = Flask(__name__)
-CORS(app)
+# 保留跨域（使用者需求），但只允許本機來源；file:// 的 Origin 為 null 不在白名單內
+CORS(app, origins=[r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"])
 
 # openpyxl 不是 process-safe 的檔案寫入，多個請求同時 load→save 會互相覆蓋，故以鎖序列化
 orders_lock = threading.Lock()
@@ -41,6 +47,7 @@ ANALYZE_ERROR_STATUS = (
     (FetchError, 502),
     (AnalyzeTimeoutError, 504),
     (AnalyzeError, 502),
+    (BusyError, 429),
 )
 
 
@@ -59,6 +66,14 @@ def analyze_error_status(analyze_error):
         if isinstance(analyze_error, error_type):
             return status_code
     return 502
+
+
+def is_local_request_host(host_header):
+    """檢查 Host 標頭的主機部分；擋下 DNS rebinding（惡意網域解析到 127.0.0.1 後以自家網域名義打進來）。"""
+    if not isinstance(host_header, str) or not host_header:
+        return False
+    hostname = urlsplit("//" + host_header).hostname
+    return hostname in LOCAL_HOSTNAMES
 
 
 def sanitize_cell(value):
@@ -184,6 +199,17 @@ def append_order_rows(rows):
             workbook.save(ORDERS_FILE)
         finally:
             workbook.close()
+
+
+@app.before_request
+def reject_non_local_api_requests():
+    """所有 /api/ 請求（含 CORS 預檢 OPTIONS）都必須以本機 Host 進來，否則 403；回傳 None 表示放行。"""
+    if not request.path.startswith("/api/"):
+        return None
+    if is_local_request_host(request.host):
+        return None
+    logger.warning("拒絕非本機 Host 的 API 請求：%s %s", request.host, request.path)
+    return error_response("僅允許本機存取", 403)
 
 
 @app.route("/")
